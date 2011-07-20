@@ -1,0 +1,17 @@
+libfib is a library for fast and small fibers (cooperatively scheduled
+userspace threads), which can load-balance an arbitrary number of
+fibers onto an arbitrary number of hardware threads with
+context-switch times on the order of a nanosecond (beat that,
+Erlang!).
+
+There's a few different synchronisation objects like mutexes,
+condition variables, blocking channels, and an implementation of the
+Actor model which has been tested up to tens of millions of actors.
+
+To use any of this stuff, you'll need my modified version of the LLVM
+compiler (see github.com/stedolan/llvm), and my patched version of the
+Clang C/C++ compiler (you'll need to apply clang.patch from this repo
+yourself).
+
+This is a big ugly code-dump at the moment. I'll clean up the repo as
+soon as the paper's written (promise!).

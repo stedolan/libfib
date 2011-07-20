@@ -1,0 +1,238 @@
+Index: include/clang/Basic/Attr.td
+===================================================================
+--- include/clang/Basic/Attr.td	(revision 132907)
++++ include/clang/Basic/Attr.td	(working copy)
+@@ -466,6 +466,10 @@
+   let Spellings = ["thiscall", "__thiscall"];
+ }
+ 
++def SwapStack : InheritableAttr {
++  let Spellings = ["swapstack"];
++}
++
+ def Pascal : InheritableAttr {
+   let Spellings = ["pascal", "__pascal"];
+ }
+Index: include/clang/Basic/Builtins.def
+===================================================================
+--- include/clang/Basic/Builtins.def	(revision 132907)
++++ include/clang/Basic/Builtins.def	(working copy)
+@@ -605,6 +605,9 @@
+ BUILTIN(__assume, "vb", "n")
+ BUILTIN(__noop, "v.", "n")
+ 
++// NewStack
++BUILTIN(__builtin_newstack, "v*v*iv*", "n")
++
+ // C99 library functions
+ // C99 stdlib.h
+ LIBBUILTIN(abort, "v",            "fr",    "stdlib.h", ALL_LANGUAGES)
+Index: include/clang/Sema/AttributeList.h
+===================================================================
+--- include/clang/Sema/AttributeList.h	(revision 132907)
++++ include/clang/Sema/AttributeList.h	(working copy)
+@@ -221,6 +221,7 @@
+     AT_shared,
+     AT_stdcall,
+     AT_thiscall,
++    AT_swapstack,          // Clang-specific
+     AT_transparent_union,
+     AT_unavailable,
+     AT_unused,
+Index: include/clang/AST/Type.h
+===================================================================
+--- include/clang/AST/Type.h	(revision 132907)
++++ include/clang/AST/Type.h	(working copy)
+@@ -369,6 +369,7 @@
+   CC_X86FastCall, // __attribute__((fastcall))
+   CC_X86ThisCall, // __attribute__((thiscall))
+   CC_X86Pascal,   // __attribute__((pascal))
++  CC_SwapStack,   // __attribute__((swapstack))
+   CC_AAPCS,       // __attribute__((pcs("aapcs")))
+   CC_AAPCS_VFP    // __attribute__((pcs("aapcs-vfp")))
+ };
+@@ -2982,7 +2983,8 @@
+     attr_fastcall,
+     attr_stdcall,
+     attr_thiscall,
+-    attr_pascal
++    attr_pascal,
++    attr_swapstack
+   };
+ 
+ private:
+Index: lib/Sema/SemaDeclAttr.cpp
+===================================================================
+--- lib/Sema/SemaDeclAttr.cpp	(revision 132907)
++++ lib/Sema/SemaDeclAttr.cpp	(working copy)
+@@ -2434,6 +2434,8 @@
+   case AttributeList::AT_pascal:
+     d->addAttr(::new (S.Context) PascalAttr(attr.getLoc(), S.Context));
+     return;
++  case AttributeList::AT_swapstack:
++    d->addAttr(::new (S.Context) SwapStackAttr(attr.getLoc(), S.Context));
+   case AttributeList::AT_pcs: {
+     Expr *Arg = attr.getArg(0);
+     StringLiteral *Str = dyn_cast<StringLiteral>(Arg);
+@@ -2489,6 +2491,7 @@
+   case AttributeList::AT_stdcall: CC = CC_X86StdCall; break;
+   case AttributeList::AT_thiscall: CC = CC_X86ThisCall; break;
+   case AttributeList::AT_pascal: CC = CC_X86Pascal; break;
++  case AttributeList::AT_swapstack: CC = CC_SwapStack; break;
+   case AttributeList::AT_pcs: {
+     Expr *Arg = attr.getArg(0);
+     StringLiteral *Str = dyn_cast<StringLiteral>(Arg);
+@@ -2937,6 +2940,7 @@
+   case AttributeList::AT_fastcall:
+   case AttributeList::AT_thiscall:
+   case AttributeList::AT_pascal:
++  case AttributeList::AT_swapstack:
+   case AttributeList::AT_pcs:
+     HandleCallConvAttr(D, Attr, S);
+     break;
+Index: lib/Sema/SemaType.cpp
+===================================================================
+--- lib/Sema/SemaType.cpp	(revision 132907)
++++ lib/Sema/SemaType.cpp	(working copy)
+@@ -120,6 +120,7 @@
+     case AttributeList::AT_stdcall: \
+     case AttributeList::AT_thiscall: \
+     case AttributeList::AT_pascal: \
++    case AttributeList::AT_swapstack: \
+     case AttributeList::AT_regparm: \
+     case AttributeList::AT_pcs \
+ 
+@@ -2271,6 +2272,8 @@
+     return AttributeList::AT_thiscall;
+   case AttributedType::attr_pascal:
+     return AttributeList::AT_pascal;
++  case AttributedType::attr_swapstack:
++    return AttributeList::AT_swapstack;
+   case AttributedType::attr_pcs:
+     return AttributeList::AT_pcs;
+   }
+Index: lib/Sema/AttributeList.cpp
+===================================================================
+--- lib/Sema/AttributeList.cpp	(revision 132907)
++++ lib/Sema/AttributeList.cpp	(working copy)
+@@ -186,6 +186,7 @@
+     .Case("thiscall", AT_thiscall)
+     .Case("bounded", IgnoredAttribute)       // OpenBSD
+     .Case("pascal", AT_pascal)
++    .Case("swapstack", AT_swapstack)
+     .Case("__cdecl", AT_cdecl)
+     .Case("__stdcall", AT_stdcall)
+     .Case("__fastcall", AT_fastcall)
+Index: lib/AST/Type.cpp
+===================================================================
+--- lib/AST/Type.cpp	(revision 132907)
++++ lib/AST/Type.cpp	(working copy)
+@@ -1374,6 +1374,7 @@
+   case CC_X86FastCall: return "fastcall";
+   case CC_X86ThisCall: return "thiscall";
+   case CC_X86Pascal: return "pascal";
++  case CC_SwapStack: return "swapstack";
+   case CC_AAPCS: return "aapcs";
+   case CC_AAPCS_VFP: return "aapcs-vfp";
+   }
+Index: lib/AST/TypePrinter.cpp
+===================================================================
+--- lib/AST/TypePrinter.cpp	(revision 132907)
++++ lib/AST/TypePrinter.cpp	(working copy)
+@@ -401,6 +401,9 @@
+   case CC_X86Pascal:
+     S += " __attribute__((pascal))";
+     break;
++  case CC_SwapStack:
++    S += " __attribute__((swapstack))";
++    break;
+   case CC_AAPCS:
+     S += " __attribute__((pcs(\"aapcs\")))";
+     break;
+@@ -872,6 +875,7 @@
+   case AttributedType::attr_stdcall: S += "stdcall"; break;
+   case AttributedType::attr_thiscall: S += "thiscall"; break;
+   case AttributedType::attr_pascal: S += "pascal"; break;
++  case AttributedType::attr_swapstack: S += "swapstack"; break;
+   case AttributedType::attr_pcs: {
+    S += "pcs(";
+    QualType t = T->getEquivalentType();
+Index: lib/AST/DumpXML.cpp
+===================================================================
+--- lib/AST/DumpXML.cpp	(revision 132907)
++++ lib/AST/DumpXML.cpp	(working copy)
+@@ -923,6 +923,7 @@
+     case CC_X86StdCall: return set("cc", "x86_stdcall");
+     case CC_X86ThisCall: return set("cc", "x86_thiscall");
+     case CC_X86Pascal: return set("cc", "x86_pascal");
++    case CC_SwapStack: return set("cc", "swapstack");
+     case CC_AAPCS: return set("cc", "aapcs");
+     case CC_AAPCS_VFP: return set("cc", "aapcs_vfp");
+     }
+Index: lib/CodeGen/CGBuiltin.cpp
+===================================================================
+--- lib/CodeGen/CGBuiltin.cpp	(revision 132907)
++++ lib/CodeGen/CGBuiltin.cpp	(working copy)
+@@ -757,6 +757,17 @@
+ 
+     return RValue::get(0);
+   }
++  case Builtin::BI__builtin_newstack: {
++    Value* Mem = Builder.CreateBitCast(EmitScalarExpr(E->getArg(0)),
++                                       Int8PtrTy);
++    Value* Len = Builder.CreateIntCast(EmitScalarExpr(E->getArg(1)),
++                                       Int32Ty, false, "tmp");
++    Value* Func = Builder.CreateBitCast(EmitScalarExpr(E->getArg(2)),
++                                        Int8PtrTy);
++
++    Value* f = CGM.getIntrinsic(Intrinsic::newstack, 0, 0);
++    return RValue::get(Builder.CreateCall3(f, Mem, Len, Func));
++  }
+   case Builtin::BI__sync_fetch_and_add:
+   case Builtin::BI__sync_fetch_and_sub:
+   case Builtin::BI__sync_fetch_and_or:
+Index: lib/CodeGen/CGCall.cpp
+===================================================================
+--- lib/CodeGen/CGCall.cpp	(revision 132907)
++++ lib/CodeGen/CGCall.cpp	(working copy)
+@@ -36,6 +36,7 @@
+   case CC_X86StdCall: return llvm::CallingConv::X86_StdCall;
+   case CC_X86FastCall: return llvm::CallingConv::X86_FastCall;
+   case CC_X86ThisCall: return llvm::CallingConv::X86_ThisCall;
++  case CC_SwapStack: return llvm::CallingConv::SwapStack;
+   case CC_AAPCS: return llvm::CallingConv::ARM_AAPCS;
+   case CC_AAPCS_VFP: return llvm::CallingConv::ARM_AAPCS_VFP;
+   // TODO: add support for CC_X86Pascal to llvm
+@@ -106,6 +107,9 @@
+   if (D->hasAttr<PascalAttr>())
+     return CC_X86Pascal;
+ 
++  if (D->hasAttr<SwapStackAttr>())
++    return CC_SwapStack;
++
+   if (PcsAttr *PCS = D->getAttr<PcsAttr>())
+     return (PCS->getPCS() == PcsAttr::AAPCS ? CC_AAPCS : CC_AAPCS_VFP);
+ 
+@@ -265,8 +269,20 @@
+                           ArgTys.data(), ArgTys.size());
+   FunctionInfos.InsertNode(FI, InsertPos);
+ 
+-  // Compute ABI information.
+-  getABIInfo().computeInfo(*FI);
++  if (Info.getCC() == CC_SwapStack){
++    QualType RetTy = FI->getReturnType();
++    if (RetTy->isVoidType())
++      FI->getReturnInfo() = ABIArgInfo::getIgnore();
++    else
++      FI->getReturnInfo() = ABIArgInfo::getDirect();
++    
++    for (CGFunctionInfo::arg_iterator it = FI->arg_begin(), ie = FI->arg_end();
++         it != ie; ++it)
++      it->info = ABIArgInfo::getDirect();
++  }else{
++    // Compute ABI information.
++    getABIInfo().computeInfo(*FI);
++  }
+ 
+   // Loop over all of the computed argument and return value info.  If any of
+   // them are direct or extend without a specified coerce type, specify the
