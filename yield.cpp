@@ -82,7 +82,7 @@ void f2(){
 
 
 int main(){
-  f2();
+  f();
 }
 /*
 template over types

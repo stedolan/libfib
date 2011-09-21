@@ -10,8 +10,23 @@ Actor model which has been tested up to tens of millions of actors.
 
 To use any of this stuff, you'll need my modified version of the LLVM
 compiler (see github.com/stedolan/llvm), and my patched version of the
-Clang C/C++ compiler (you'll need to apply clang.patch from this repo
-yourself).
+Clang C/C++ compiler (github.com/stedolan/clang).
 
-This is a big ugly code-dump at the moment. I'll clean up the repo as
-soon as the paper's written (promise!).
+This is a big ugly code-dump at the moment. I'll clean up the repo
+sometime... promise! (kinda).
+
+
+Setting up a build environment:
+
+git clone http://github.com/stedolan/llvm
+{ cd llvm/tools; git clone http://github.com/stedolan/clang; }
+{ cd llvm; ./configure && make; }
+
+After you clone this repo, you'll need to modify LLVM_BINDIR at the
+top of the Makefile and run "make plat=x86_64". If you're running on
+PowerPC you'll need to have an SSH-able PPC host set up, and fiddle
+with Makefile a bit (good luck, it's a mess).
+
+fiber2.cpp is a good place to start hacking, it has examples of most
+of the library's features. yield.cpp is simpler, it might be a better
+testcase to determine whether clang's working.
