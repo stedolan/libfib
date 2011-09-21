@@ -16,8 +16,8 @@ static waiter<void>* terminating_main_thread;
 
 static void* worker_threadfunc(void* worker_init_){
   worker_init* wi = (worker_init*)worker_init_;
-  assert(current_worker_ == 0);
-  current_worker_ = wi->this_;
+  assert(worker::current_() == 0);
+  worker::current_() = wi->this_;
   say("  running\n");
   if (wi->mainfiber){
     waiter<void> w;
@@ -27,7 +27,8 @@ static void* worker_threadfunc(void* worker_init_){
   }
   worker::current().scheduler_loop();
   say("  worker terminating\n");
-  current_worker_ = 0;
+  assert(worker::current().thisthread == pthread_self());
+  worker::current_() = 0;
   delete wi;
   return NULL;
 }
@@ -69,7 +70,7 @@ void worker::spawn_and_join_workers(int nworkers, fiber_func* mainfiber){
 
 static __attribute__((swapstack)) void worker_sched_thunk(func_t* fib, worker* thisworker, waiter<void>* mainfib){
   announce_paused(&mainfib->func, fib);
-  assert(current_worker_ == thisworker);
+  assert(worker::current_() == thisworker);
   say("  sched starting\n");
   
   // We add ourselves to the local reserved runqueue
@@ -81,8 +82,8 @@ static __attribute__((swapstack)) void worker_sched_thunk(func_t* fib, worker* t
   w.invoke(mainfib);
   // This will run as soon as mainfib yields
   worker::current().scheduler_loop();
-  say("  working terminating!?\n");
-  current_worker_ = 0;
+  say("  main-thread worker terminating\n");
+  worker::current_() = 0;
   
   assert(terminating_main_thread);
   waiter<void> dead;
@@ -110,7 +111,7 @@ void worker::spawn_workers(int nworkers){
   }
   // The current thread becomes a worker
   // We make a fiber to run the scheduler loop
-  current_worker_ = all_workers[0];
+  worker::current_() = all_workers[0];
   void* stack = malloc(102400); //FIXME size
   typedef __attribute__((swapstack)) switcher<void,void>::retval 
     (*schedfiber)(worker*, waiter<void>*);
@@ -132,7 +133,7 @@ void worker::await_completion(){
   worker::current().sleep(w);
   // we'll be woken up when the scheduler dies
   assert(all_workers);
-  assert(!current_worker_);
+  assert(!worker::current_());
   for (int i=1; i<nworkers;i++){
     pthread_join(all_workers[i]->thisthread, 0);
   }
@@ -150,5 +151,9 @@ void worker::await_completion(){
 int worker::nworkers;
 worker** worker::all_workers;
 llq::word worker::active_workers = 0;
-llq::node worker::sentinel;
+llq::node worker::sentinel = { 0 };
+#if defined(FIBER_SINGLETHREADED)
+worker* current_worker_;
+#elif !defined(LLQ_PPC64)
 __thread worker* current_worker_;
+#endif

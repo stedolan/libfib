@@ -49,11 +49,12 @@ public:
 
 
 Printer::Msg* finalmsg = new Printer::Msg;
+
 class Incrementor : public Actor<Incrementor>{
 public:
   enum MessageType {MSG};
   typedef Message<Incrementor, MSG, pair<int, int> > Msg;
-  __attribute__((always_inline)) void run(){
+  void run(){
     while (1){
       Msg* msg = (Msg*)receive();
       pair<int, int> p = msg->payload;
@@ -73,6 +74,35 @@ public:
 };
 
 
+class Doubler : public Actor<Doubler>{
+public:
+  enum MessageType {MSG};
+  typedef RequestMessage<Doubler, MSG, int, int> Msg;
+  void run(){
+    while (1){
+      printf("D: waiting\n");
+      Msg& msg = receive()->as<Msg>();
+      printf("D: Doubling %d\n", msg.payload*2);
+      msg.reply(msg.payload * 2);
+    }
+  }
+};
+
+class Requestor : public Actor<Requestor>{
+public:
+  Doubler* dbl;
+  int id;
+  void run(){
+    for (int i=0; i<100; i++){
+      printf("R%d: req %d\n", id, i);
+      Doubler::Msg msg(i);
+      int reply = dbl->request(&msg);
+      printf("R%d: rep %d\n", id, reply);
+    }
+  }
+};
+
+
 
 
 template <class ActorT>
@@ -82,7 +112,7 @@ int actor_thunk(ActorT* act){
 }
 
 template <class ActorT>
-__attribute__((always_inline)) void actor_thunk_v(ActorT* act){
+void actor_thunk_v(ActorT* act){
   act->run();
 }
 
@@ -92,7 +122,7 @@ void spawn_incrementors(int n, int msg){
   Incrementor* incs = new Incrementor[n];
   Printer* p = new Printer;
   fiber_handle<int> pt = spawn_fiber_fixed<int, Printer*, actor_thunk<Printer> >(p, 102400);
-#define SS 128
+#define SS 256
   char* stacks = (char*)new void*[n * (SS / sizeof(void*))];
   for (int i=0; i<n; i++){
     incs[i].next = i == n-1 ? &incs[0] : &incs[i+1];
@@ -106,11 +136,21 @@ void spawn_incrementors(int n, int msg){
 
 
 
-int main(){
+int main(int argc, char** argv){
   worker::spawn_workers(1);
-  const int n = 10000000;
-  //spawn_incrementors(n, n*100);
-  spawn_incrementors(503, 50000000);
+  spawn_incrementors(atoi(argv[1]), atoi(argv[2]));
+  //  spawn_incrementors(503, 500);
+  
+  //Doubler* dbl = new Doubler;
+  //dbl->start();
+  //spawn_fiber_fixed<int, Doubler*, actor_thunk<Doubler> >(dbl, 102400);
+  /*
+  for (int i=0; i<2; i++){
+    Requestor* r = new Requestor;
+    r->id = i;
+    r->dbl = dbl;
+    r->start();
+    }*/
   /*
   FloatPrinter* fp = new FloatPrinter;
 

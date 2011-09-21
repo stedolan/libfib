@@ -17,3 +17,4 @@ CLINKAGE int pthread_create(pthread_t* thread, pthread_attr_t* attr,
                             void* (*start_fn)(void*), void* arg);
 CLINKAGE int pthread_detach(pthread_t thread);
 CLINKAGE int pthread_join(pthread_t thread, void** retptr);
+

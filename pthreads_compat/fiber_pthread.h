@@ -77,4 +77,5 @@ CLINKAGE int fiber_pthread_create(fiber_pthread_t* thread, fiber_pthread_attr_t*
 CLINKAGE int fiber_pthread_detach(fiber_pthread_t thread);
 CLINKAGE int fiber_pthread_join(fiber_pthread_t thread, void** retptr);
 CLINKAGE int fiber_pthread_yield();
+
 #endif

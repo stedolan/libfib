@@ -7,16 +7,26 @@
 #include <pthread.h>
 #include <unistd.h>
 #define FIBER_FULL_DEFINITIONS
-#include "fiber_pthread.h"
-#include "../sync_object.h"
-#include "../spawn.h"
+#include "pthreads_compat/fiber_pthread.h"
+#include "sync_object.h"
+#include "spawn.h"
 
 static struct worker_spawner{
   worker_spawner(){
 #ifndef QUIET
     printf("Spawning workers\n");
 #endif
-    worker::spawn_workers(atoi(getenv("FIBER_WORKERS")));
+    
+    int nworkers;
+#ifdef FIBER_SINGLETHREADED
+    nworkers = 1;
+#else
+    const char* s = getenv("FIBER_WORKERS");
+    if (!s) abort();
+    nworkers = atoi(s);
+#endif
+    
+    worker::spawn_workers(nworkers);
 #ifndef QUIET
     printf("Workers running\n");
 #endif
@@ -33,7 +43,7 @@ static struct worker_spawner{
 } spawner;
 
 int fiber_pthread_mutex_init(fiber_pthread_mutex_t* mtx, fiber_pthread_mutexattr_t*){
-  mtx->sync.init();
+  mtx->sync.init(mutex::UNLOCKED);
   return 0;
 }
 
@@ -69,7 +79,7 @@ int fiber_pthread_cond_broadcast(fiber_pthread_cond_t* cond){
   return 0;
 }
 int fiber_pthread_cond_destroy(fiber_pthread_cond_t* cond){
-  //FIXME: assert(!blocked);
+  //FIXME: (!blocked);
   return 0;
 }
 
@@ -97,12 +107,14 @@ int fiber_pthread_create(fiber_pthread_t* thread, fiber_pthread_attr_t* attr,
   first_pthread = 0;
   size_t stacksize = attr ? attr->stacksize : 0;
   running_fiber<void*>* fib = spawn_fiber(start_fn, arg, stacksize).fib;
+  assert(fib);
   *thread = (void*)fib;
   return 0;
 }
 
 int fiber_pthread_join(fiber_pthread_t thread, void** ret){
   running_fiber<void*>* fib = (running_fiber<void*>*)thread;
+  assert(fib);
   void* ans = fib->blk.accept()->data;
   free(fib->stack);
   if (ret) *ret = ans;

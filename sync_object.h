@@ -33,9 +33,13 @@ struct fiber_sync_object{
     //llq::spin_init(&control);
     llq::queue_init(&queue, tag);
   }
+#ifdef FIBER_SINGLETHREADED
 #define DISPMETH -1
+#else
+#define DISPMETH 1
+#endif
   dispatch_method begin_operation(){
-
+    llq::concurrent_ops::begin(&queue);
     word OWNED_SELF = OWNER_START + worker::current().id;
 
 #if DISPMETH == -1
@@ -94,6 +98,7 @@ struct fiber_sync_object{
 #endif    
   }
   void end_operation(){
+    llq::concurrent_ops::end(&queue);
   }
 
 #endif
@@ -129,6 +134,8 @@ struct mutex{
           return;
         }
       }else{
+        assert(ops::isempty(q, state));
+        assert(ops::tag(q, state) == UNLOCKED);
         if (ops::try_transition(q, state, LOCKED)){
           return;
         }

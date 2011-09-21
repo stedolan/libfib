@@ -8,7 +8,7 @@ typedef void (func_t)(void);
 
 static inline void announce_paused(func_t** loc, func_t* f){
   // FIXME barriers?
-  *loc = f;
+  llq::signal_initialisation((llq::word*)loc, (llq::word)f);
 }
 
 template <class Ret, class Arg>

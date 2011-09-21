@@ -2,62 +2,20 @@
 #define SCHED_H
 #include "llq.h"
 #include "switch.h"
+#include "io.h"
 
 using namespace llq;
 
 
 #define NOINLINE __attribute__((noinline))
 
-struct single_thread_ops{
-  static bool try_enqueue(queue* q, node* nodeptr, word oldstate, word newtag){
-    llq::ST_enqueue(q, nodeptr, oldstate, newtag);
-    return true;
-  }
-  static bool try_dequeue(queue* q, node** nodeptr, word oldstate, word newtag_ifempty){
-    llq::ST_dequeue(q, nodeptr, oldstate, newtag_ifempty);
-    return true;
-  }
-  static bool try_transition(queue* q, word oldstate, word newtag){
-    llq::ST_transition(q, oldstate, newtag);
-    return true;
-  }
-  static word get_state(queue* q){
-    return llq::q_get_state(q);
-  }
-  static bool isempty(queue* q, word state){
-    return llq::state_isempty(q, state);
-  }
-  static bool tag(queue* q, word state){
-    return llq::tagptr_tag(state);
-  }
-};
-struct concurrent_ops{
-  static bool try_enqueue(queue* q, node* nodeptr, word oldstate, word newtag){
-    return llq::MT_try_enqueue(q, nodeptr, oldstate, newtag);
-  }
-  static bool try_dequeue(queue* q, node** nodeptr, word oldstate, word newtag_ifempty){
-    return llq::MT_try_dequeue(q, nodeptr, oldstate, newtag_ifempty);
-  }
-  static bool try_transition(queue* q, word oldstate, word newtag){
-    return llq::MT_try_transition(q, oldstate, newtag);
-  }
-  static word get_state(queue* q){
-    return llq::q_get_state(q);
-  }
-  static bool isempty(queue* q, word state){
-    return llq::state_isempty(q, state);
-  }
-  static bool tag(queue* q, word state){
-    return llq::tagptr_tag(state);
-  }
-};
 
 
 #define SWAPSTACK __attribute__((swapstack))
 typedef void (func_t)(void);
 
 #ifdef QUIET
-#define say(...)
+#define say(...) ((void)0)
 #else
 #define say(fmt, ...) fprintf(stdout, "WRK%*d%*s: " fmt, \
          1+(int)worker::current().id,                    \
@@ -89,10 +47,18 @@ typedef void (fiber_func)(int);
 
 
 struct worker;
+#if defined(FIBER_SINGLETHREADED)
+extern worker* current_worker_;
+#elif !defined(LLQ_PPC64)
 extern __thread worker* current_worker_;
+#else
+// PowerPC Clang does not support TLS, so
+// we use a small stub compiled with gcc
+worker*& get_current_worker_();
+#endif
 
 
-#define STACKSIZE 40960
+#define STACKSIZE 409600
 static SWAPSTACK void fiber_init_thunk(func_t fib, func_t** loc, fiber_func* func, int arg);
 struct worker{
   static int nworkers;
@@ -129,6 +95,7 @@ struct worker{
   int randseed;
   llq::node* local_reserved;
   int lifo_push_count;
+  io_manager iomgr;
 
   char pad[64];
 
@@ -174,15 +141,25 @@ struct worker{
   
   worker_stats stats;
 
-  worker(){
+  worker() : iomgr(this){
     local_reserved = &sentinel;
     llq::queue_init(&local, 0);
     llq::queue_init(&remote, 0);
     randseed = 35442352 + id * 23243;
   }
 
+  #ifndef LLQ_PPC64
+  static inline worker*& current_(){
+    return current_worker_;
+  }
+  #else
+  static worker*& current_(){
+    return get_current_worker_();
+  }
+  #endif
+
   static inline worker& current(){
-    return *current_worker_;
+    return *current_();
   }
 
 
@@ -190,7 +167,8 @@ struct worker{
     assert(local_reserved);
     assert(local_reserved != &sentinel);
     llq::node* first = local_reserved;
-    local_reserved = first->next; //llq::node_next(first);
+    local_reserved = /*first->next; */llq::node_next(first);
+    assert(local_reserved && "nextpointer uninitialised!");
     stats.qpops++;
     stats.localres++;
     return static_cast<waiter<void>* >(first);
@@ -198,14 +176,22 @@ struct worker{
 
   void push_runqueue_fifo(waiter<void>* w){
     // FIXME: SP enqueue
-    while (!llq::MT_try_enqueue(&local, static_cast<node*>(w), 
-                                llq::q_get_state(&local), 0));
+#ifdef FIBER_SINGLETHREADED
+    llq::single_thread_ops::enqueue(&local, static_cast<node*>(w));
+#else
+    llq::concurrent_ops::begin(&local);
+    while (!llq::concurrent_ops::try_enqueue(&local, static_cast<node*>(w), 
+                                             llq::q_get_state(&local), 0));
+    llq::concurrent_ops::end(&local);
+#endif
   }
   void push_runqueue_lifo(waiter<void>* w){
+    assert(local_reserved);
     w->next = local_reserved;
     local_reserved = w;
   }
   void push_runqueue(waiter<void>* w){
+    assert(w);
     stats.qpushes++;
     if (lifo_push_count > 0){
       lifo_push_count--;
@@ -235,13 +221,15 @@ struct worker{
     llq::fetch_and_inc2(&worker::active_workers);
     stats.migrateout++;
     waiter<void>* waiting = pop_runqueue();
+    llq::concurrent_ops::begin(&target->remote);
     while (1){
       llq::word tag = llq::q_get_state(&target->remote);
-      if (llq::MT_try_enqueue(&target->remote, &w, tag, 0)){
+      if (llq::concurrent_ops::try_enqueue(&target->remote, &w, tag, 0)){
         w.invoke(waiting);
         break;
       }
     }
+    llq::concurrent_ops::end(&target->remote);
   }
 
   int rand(){
@@ -249,31 +237,59 @@ struct worker{
   }
 
   bool try_steal_work(llq::node** firstptr, llq::node** lastptr, bool mark_activity){
+    #ifdef FIBER_SINGLETHREADED
+    return 0;
+    #else
     //    say("Stealing work - %d\n", worker::active_workers);
+    typedef llq::concurrent_ops ops;
     int start = rand() % nworkers;
     for (int i=((start+1)%nworkers); i!=start; i = (i+1) % nworkers){
       worker* w = all_workers[i];
       if (w == this) continue;
-      llq::word tag = llq::q_get_state(&w->local);
+      ops::begin(&w->local);
+      llq::word tag = ops::get_state(&w->local);
       llq::node* nodeptr;
-      if (!llq::state_isempty(&w->local, tag)){
+      if (!ops::isempty(&w->local, tag)){
         if (mark_activity) set_active();
         say("  going to steal from %d...\n", i);
-        if (llq::MT_try_dequeue(&w->local, &nodeptr, tag, 0)){
+        if (ops::try_dequeue(&w->local, &nodeptr, tag, 0)){
         //        if (llq::MT_try_flush(&w->local, firstptr, lastptr, tag, 0)){
           say("  ...stolen\n");
           *firstptr = *lastptr = nodeptr;
+          ops::end(&w->local);
           return true;
         }else{
           say("  ...failed\n");
         }
+        ops::end(&w->local);
         if (mark_activity){
           set_inactive();
           if (is_terminated()) return false;
         }
+      }else{
+        ops::end(&w->local);
       }
     }
     return false;
+    #endif
+  }
+
+  bool try_perform_io(llq::node** newblock, llq::node** newblock_last){
+    llq::queue wokenq;
+    llq::queue_init(&wokenq, 0);
+    int nwoken = iomgr.perform_io(&wokenq);
+    if (nwoken > 0){
+      say("IO performed, %d fibers became runnable\n", nwoken);
+      *newblock = llq::single_thread_ops::head(&wokenq);
+      *newblock_last = llq::single_thread_ops::tail(&wokenq);
+      return true;
+    }else if (nwoken < 0){
+      assert(0); // FIXME errors
+      return 0;
+    }else{
+      // No I/O
+      return false;
+    }
   }
   
   bool try_get_scarce_work(llq::node** newblock, llq::node** newblock_last){
@@ -283,22 +299,29 @@ struct worker{
     say("Not much to steal...\n");
     set_inactive();
     stats.scarce++;
+    typedef llq::concurrent_ops ops;
     while (1){
       //      stats.scarce++;
 
       // FIXME dup
-      llq::word rtag = llq::q_get_state(&remote);
-      if (!llq::state_isempty(&remote, rtag)){
+      ops::begin(&remote);
+      llq::word rtag = ops::get_state(&remote);
+      if (!ops::isempty(&remote, rtag)){
         // FIXME: only dequeuing a single node from 
         // remotequeue penalises migration
-        if (llq::MT_try_dequeue(&remote, newblock, rtag, 0)){
+        if (ops::try_dequeue(&remote, newblock, rtag, 0)){
           stats.migratein++;
           set_active();
           llq::fetch_and_dec2(&worker::active_workers);
           *newblock_last = *newblock;
+          ops::end(&remote);
           break;
+        }else{
+          ops::end(&remote);
+          continue;
         }
       }else{
+        ops::end(&remote);
         if (try_steal_work(newblock, newblock_last, true)){
           break;
         }
@@ -308,6 +331,50 @@ struct worker{
       }
     }
     return true;
+  }
+
+  bool try_get_remote(llq::node** newblock, llq::node** newblock_last){
+#ifdef FIBER_SINGLETHREADED
+    return 0;
+#else
+    typedef llq::concurrent_ops ops;
+    ops::begin(&remote);
+    bool r;
+    llq::word rtag = ops::get_state(&remote);
+    if (!ops::isempty(&remote, rtag)
+        &&
+        ops::try_dequeue(&remote, newblock, rtag, 0)){
+      llq::fetch_and_dec2(&worker::active_workers);
+      *newblock_last = *newblock;
+      r = true;
+    }else{
+      r = false;
+    }
+    ops::end(&remote);
+    return r;
+#endif
+  }
+
+  bool try_get_local(llq::node** newblock, llq::node** newblock_last){
+#ifdef FIBER_SINGLETHREADED
+    typedef llq::single_thread_ops ops;
+#else
+    typedef llq::concurrent_ops ops;
+#endif
+    ops::begin(&local);
+    bool r;
+    llq::word ltag = ops::get_state(&local);
+    if (!ops::isempty(&local, ltag)
+        &&
+        /*llq::MT_try_flush(&local, &newblock, &newblock_last, ltag, 0))*/
+        ops::try_dequeue(&local, newblock, ltag, 0)){
+      *newblock_last = *newblock;
+      r = true;
+    }else{
+      r = false;
+    }
+    ops::end(&local);
+    return r;
   }
 
   void scheduler_loop(){
@@ -325,27 +392,17 @@ struct worker{
       llq::word rtag = llq::q_get_state(&remote);
       llq::word ltag = llq::q_get_state(&local);
       // Get a new batch of work, from somewhere
-      if (!llq::state_isempty(&remote, rtag)
-          && 
-          llq::MT_try_dequeue(&remote, &newblock, rtag, 0)){
-        // Got work from remote queue
-        // FIXME: only dequeuing a single node from 
-        // remotequeue penalises migration
+      if (try_get_remote(&newblock, &newblock_last)){
+        // Something migrated in
         stats.migratein++;
-
-        llq::fetch_and_dec2(&worker::active_workers);
-        newblock_last = newblock;
-      }else if (!llq::state_isempty(&local, ltag)
-                &&
-                /*llq::MT_try_flush(&local, &newblock, &newblock_last, ltag, 0))*/
-                llq::MT_try_dequeue(&local, &newblock, ltag, 0))
-        {
-          newblock_last = newblock;
+      }else if (try_get_local(&newblock, &newblock_last)){
         // got some more work from local queue
       }else if (try_steal_work(&newblock, &newblock_last, false)){
         // stole some more work
         stats.steals++;
         stolen = true;
+      }else if (try_perform_io(&newblock, &newblock_last)){
+        // did some I/O
       }else if (try_get_scarce_work(&newblock, &newblock_last)){
         // nearly ran out of work!
         say("Got scarce work\n");
@@ -372,8 +429,10 @@ struct worker{
       // essentially this:
       //local_reserved = newblock;
       //sleep(&w.func);
-      lifo_push_count = 10;
+      // FIXME: wtf.
+      lifo_push_count = 2;
       local_reserved = llq::node_next(newblock);
+      assert(local_reserved);
       if (stolen) say("  executing new block\n");
       w.invoke(static_cast<waiter<void>* >(newblock));
     }
@@ -404,8 +463,10 @@ struct worker{
     worker::current().push_runqueue(&w);
     new_fiber(func, arg, &w.func);
   }
-
-
+  
+  void add_fd(int fd){
+    iomgr.setup_fd(fd);
+  }
 };
 
 

@@ -15,6 +15,7 @@ struct running_fiber {
 
 typedef unsigned long long stackmem[(102400 + sizeof(running_fiber<void*>))/8];
 
+#if 0
 enum {NSTK = 10000};
 __thread stackmem* stk;
 __thread int maxstk;
@@ -37,7 +38,7 @@ void free_stack(void* p){
   stknext = (stackmem*)p;
 }
 
-
+#endif
 
 
 template <class T>
@@ -125,10 +126,10 @@ template <class Arg, void (Func)(Arg)>
 void spawn_fiber_fixed_detached(Arg arg, size_t stacksize, void* stack){
   typedef SWAPSTACK typename switcher<void,void>::retval 
     (*new_fiber_t)(func_t**, Arg, void*);
-  new_fiber_t fiber = (new_fiber_t)__builtin_newstack(stack, stacksize, (void*)fiber_init_thunk_detach<Arg,Func>);
   say("spawning\n");
   waiter<void> w;
   worker::current().push_runqueue(&w);
+  new_fiber_t fiber = (new_fiber_t)__builtin_newstack(stack, stacksize, (void*)fiber_init_thunk_detach<Arg,Func>);
   switcher<void,void>::retval rv = fiber(&w.func, arg, stack);
   announce_paused(rv.store_loc, rv.function);
 }
@@ -185,6 +186,7 @@ fiber_handle<Ret> spawn_fiber(Ret (*func)(Arg), Arg arg, size_t stacksize = 0){
   switcher<void,void>::retval rv = fiber(&w.func, func, arg, &rfib->blk);
   announce_paused(rv.store_loc, rv.function);
   
+  assert(rfib);
   fiber_handle<Ret> fibh;
   fibh.fib = rfib;
   return fibh;
